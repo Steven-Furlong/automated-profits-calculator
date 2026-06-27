@@ -1,1 +1,2 @@
-SKU,product_name,material_cost,packaging_cost,other_cost
+SKU,product_name,material,quantity
+BTN-BOX-01,Truck Sim Button Box,filament,150
