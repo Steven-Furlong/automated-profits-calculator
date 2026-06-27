@@ -1,15 +1,6 @@
-# Virtual environment
 venv/
-
-# Environment variables
 .env
-
-# Temp files
 verifier.tmp
-
-# Python cache
 __pycache__/
 *.pyc
-
-# Outputs
 outputs/
