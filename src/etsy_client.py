@@ -19,6 +19,17 @@ def get_headers():
         "Content-Type": "application/json"
     }
 
+def get_ledger_entries(limit=100, offset=0, min_created=None, max_created=None):
+    url = f"{BASE_URL}/application/shops/{SHOP_ID}/payment-account/ledger-entries"
+    params = {"limit": limit, "offset": offset}
+    if min_created:
+        params["min_created"] = min_created
+    if max_created:
+        params["max_created"] = max_created
+    response = requests.get(url, headers=get_headers(), params=params)
+    response.raise_for_status()
+    return response.json()
+
 def get_shop_receipts(limit=100, offset=0, min_created=None, max_created=None):
     url = f"{BASE_URL}/application/shops/{SHOP_ID}/receipts"
     params = {

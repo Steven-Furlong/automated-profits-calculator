@@ -2,7 +2,7 @@ import os
 import sys
 from datetime import datetime, timezone
 import pandas as pd
-from etsy_client import get_shop_receipts
+from etsy_client import get_shop_receipts, get_ledger_entries
 
 def year_to_timestamps(year):
     start = int(datetime(year, 1, 1, tzinfo=timezone.utc).timestamp())
@@ -25,6 +25,34 @@ def fetch_all_receipts(year=None):
         offset += limit
 
     return all_receipts
+
+FEE_TYPES = {"listing", "transaction", "payment_processing", "offsite_ads"}
+
+def fetch_all_ledger_entries(year=None):
+    all_entries = []
+    offset = 0
+    limit = 100
+    min_ts, max_ts = year_to_timestamps(year) if year else (None, None)
+
+    while True:
+        data = get_ledger_entries(limit=limit, offset=offset, min_created=min_ts, max_created=max_ts)
+        results = data.get("results", [])
+        all_entries.extend(results)
+        if len(results) < limit:
+            break
+        offset += limit
+
+    return all_entries
+
+def calculate_fees(entries):
+    fees_by_type = {}
+    for e in entries:
+        entry_type = e.get("entry_type", "")
+        if entry_type not in FEE_TYPES:
+            continue
+        amount = abs(e["amount"]) / e["divisor"]
+        fees_by_type[entry_type] = fees_by_type.get(entry_type, 0) + amount
+    return fees_by_type
 
 def parse_receipts(receipts):
     rows = []
@@ -49,13 +77,25 @@ def parse_receipts(receipts):
 
     return pd.DataFrame(rows)
 
-def calculate_profit(df):
+def calculate_profit(df, fees_by_type):
+    gross = df["grandtotal"].sum()
+    tax = df["tax_collected"].sum()
+    total_fees = sum(fees_by_type.values())
+    net = gross - tax - total_fees
+
     summary = {
         "Total Orders": len(df),
-        "Gross Revenue": df["grandtotal"].sum(),
-        "Tax Collected (remit to CRA)": df["tax_collected"].sum(),
+        "Gross Revenue": gross,
+        "Tax Collected (remit to CRA)": tax,
         "Discounts Given": df["discount"].sum(),
-        "Net Revenue": df["grandtotal"].sum() - df["tax_collected"].sum(),
+        "--- Etsy Fees ---": None,
+        "  Listing Fees": fees_by_type.get("listing", 0),
+        "  Transaction Fees (6.5%)": fees_by_type.get("transaction", 0),
+        "  Payment Processing Fees": fees_by_type.get("payment_processing", 0),
+        "  Offsite Ads Fees": fees_by_type.get("offsite_ads", 0),
+        "Total Etsy Fees": total_fees,
+        "--- Result ---": None,
+        "Net Profit": net,
     }
     return summary
 
@@ -67,12 +107,21 @@ if __name__ == "__main__":
     receipts = fetch_all_receipts(year=year)
     print(f"Fetched {len(receipts)} receipts")
 
-    df = parse_receipts(receipts)
-    print(f"Processing {len(df)} non-cancelled orders\n")
+    print(f"Fetching ledger entries ({label})...")
+    entries = fetch_all_ledger_entries(year=year)
+    print(f"Fetched {len(entries)} ledger entries")
 
-    summary = calculate_profit(df)
+    df = parse_receipts(receipts)
+    fees_by_type = calculate_fees(entries)
+    print(f"\nProcessing {len(df)} non-cancelled orders\n")
+    print("=" * 40)
+
+    summary = calculate_profit(df, fees_by_type)
     for k, v in summary.items():
-        if isinstance(v, float):
+        if v is None:
+            print(f"\n{k}")
+        elif isinstance(v, float):
             print(f"{k}: ${v:,.2f} CAD")
         else:
             print(f"{k}: {v}")
+    print("=" * 40)
