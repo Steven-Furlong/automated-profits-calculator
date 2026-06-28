@@ -19,15 +19,18 @@ def get_headers():
         "Content-Type": "application/json"
     }
 
-def get_shop_receipts(limit=100, offset=0):
+def get_shop_receipts(limit=100, offset=0, min_created=None, max_created=None):
     url = f"{BASE_URL}/application/shops/{SHOP_ID}/receipts"
     params = {
         "limit": limit,
         "offset": offset,
         "was_paid": True
     }
+    if min_created:
+        params["min_created"] = min_created
+    if max_created:
+        params["max_created"] = max_created
     response = requests.get(url, headers=get_headers(), params=params)
-    print(response.json())
     response.raise_for_status()
     return response.json()
 
