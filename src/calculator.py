@@ -3,6 +3,7 @@ import sys
 from datetime import datetime, timezone
 import pandas as pd
 from etsy_client import get_shop_receipts, get_ledger_entries
+from expenses import parse_expenses, summarize_expenses
 
 def year_to_timestamps(year):
     start = int(datetime(year, 1, 1, tzinfo=timezone.utc).timestamp())
@@ -131,10 +132,10 @@ def calculate_gst_hst_by_province(df):
     grouped["tax_owed"] = grouped["taxable_sales"] * grouped["tax_rate"]
     return grouped.sort_values("tax_owed", ascending=False)
 
-def calculate_profit(df, fees_by_type, gst_hst_owed):
+def calculate_profit(df, fees_by_type, gst_hst_owed, total_expenses=0):
     gross = df["grandtotal"].sum()
     total_fees = sum(fees_by_type.values())
-    net = gross - gst_hst_owed - total_fees
+    net = gross - gst_hst_owed - total_fees - total_expenses
 
     summary = {
         "Total Orders": len(df),
@@ -146,11 +147,13 @@ def calculate_profit(df, fees_by_type, gst_hst_owed):
     for ledger_type, amount in sorted(fees_by_type.items(), key=lambda x: -x[1]):
         summary[f"  {ledger_type}"] = amount
     summary["Total Etsy Fees"] = total_fees
+    summary["--- Credit Card Expenses ---"] = None
+    summary["Total Business Expenses"] = total_expenses
     summary["--- Result ---"] = None
     summary["Net Profit"] = net
     return summary
 
-def build_report_lines(label, df, summary, gst_hst, gst_hst_total):
+def build_report_lines(label, df, summary, gst_hst, gst_hst_total, by_category=None, uncategorized=None, total_uncategorized=0):
     lines = []
     lines.append(f"Syntaxis Profit Report -- {label}")
     lines.append(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
@@ -178,6 +181,19 @@ def build_report_lines(label, df, summary, gst_hst, gst_hst_total):
                           f"tax owed ${row['tax_owed']:,.2f} CAD")
         lines.append(f"\nTotal GST/HST owed: ${gst_hst_total:,.2f} CAD")
     lines.append("=" * 40)
+
+    if by_category is not None and len(by_category) > 0:
+        lines.append("\nBusiness Expenses by Category")
+        lines.append("-" * 40)
+        for category, amount in by_category.items():
+            lines.append(f"  {category}: ${amount:,.2f} CAD")
+        if total_uncategorized > 0:
+            lines.append(f"\n  UNCATEGORIZED (review needed): ${total_uncategorized:,.2f} CAD")
+            if uncategorized is not None and not uncategorized.empty:
+                for _, row in uncategorized.iterrows():
+                    lines.append(f"    {row['date'].date()}  {row['description'][:50]:<50}  ${row['amount_cad']:,.2f}")
+        lines.append("=" * 40)
+
     return lines
 
 def save_report(label, df, lines):
@@ -196,6 +212,7 @@ def save_report(label, df, lines):
 
 if __name__ == "__main__":
     year = int(sys.argv[1]) if len(sys.argv) > 1 else None
+    csv_path = sys.argv[2] if len(sys.argv) > 2 else None
     label = str(year) if year else "all_time"
 
     print(f"Fetching receipts ({label})...")
@@ -211,8 +228,12 @@ if __name__ == "__main__":
     gst_hst = calculate_gst_hst_by_province(df)
     gst_hst_total = gst_hst["tax_owed"].sum() if not gst_hst.empty else 0
 
-    summary = calculate_profit(df, fees_by_type, gst_hst_total)
-    lines = build_report_lines(label, df, summary, gst_hst, gst_hst_total)
+    by_category, total_expenses, uncategorized, total_uncategorized = (
+        summarize_expenses(parse_expenses(csv_path, year=year)) if csv_path else ({}, 0, pd.DataFrame(), 0)
+    )
+
+    summary = calculate_profit(df, fees_by_type, gst_hst_total, total_expenses)
+    lines = build_report_lines(label, df, summary, gst_hst, gst_hst_total, by_category, uncategorized, total_uncategorized)
 
     print()
     for line in lines:
