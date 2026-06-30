@@ -26,32 +26,54 @@ def fetch_all_receipts(year=None):
 
     return all_receipts
 
-FEE_TYPES = {"listing", "transaction", "payment_processing", "offsite_ads"}
+MAX_WINDOW_SECONDS = 2678400  # 31 days, Etsy's ledger-entries limit
+
+def month_windows(start_ts, end_ts):
+    windows = []
+    window_start = start_ts
+    while window_start <= end_ts:
+        window_end = min(window_start + MAX_WINDOW_SECONDS - 1, end_ts)
+        windows.append((window_start, window_end))
+        window_start = window_end + 1
+    return windows
 
 def fetch_all_ledger_entries(year=None):
     all_entries = []
-    offset = 0
-    limit = 100
-    min_ts, max_ts = year_to_timestamps(year) if year else (None, None)
+    if year:
+        min_ts, max_ts = year_to_timestamps(year)
+    else:
+        min_ts = int(datetime(2015, 1, 1, tzinfo=timezone.utc).timestamp())
+        max_ts = int(datetime.now(timezone.utc).timestamp())
 
-    while True:
-        data = get_ledger_entries(limit=limit, offset=offset, min_created=min_ts, max_created=max_ts)
-        results = data.get("results", [])
-        all_entries.extend(results)
-        if len(results) < limit:
-            break
-        offset += limit
+    for window_start, window_end in month_windows(min_ts, max_ts):
+        offset = 0
+        limit = 100
+        while True:
+            data = get_ledger_entries(limit=limit, offset=offset, min_created=window_start, max_created=window_end)
+            results = data.get("results", [])
+            all_entries.extend(results)
+            if len(results) < limit:
+                break
+            offset += limit
 
     return all_entries
+
+NON_FEE_TYPES = {
+    "DISBURSE2",      # payout to your bank account, not a fee
+    "REFUND_GROSS",   # refunds issued to customers, not a fee
+    "sales_tax",      # tax collected from buyers, already in tax_collected
+}
 
 def calculate_fees(entries):
     fees_by_type = {}
     for e in entries:
-        entry_type = e.get("entry_type", "")
-        if entry_type not in FEE_TYPES:
+        ledger_type = e.get("ledger_type", "")
+        if ledger_type in NON_FEE_TYPES:
             continue
-        amount = abs(e["amount"]) / e["divisor"]
-        fees_by_type[entry_type] = fees_by_type.get(entry_type, 0) + amount
+        amount = e["amount"] / 100
+        if amount >= 0:
+            continue  # only count charges (negative amounts), not deposits/refunds
+        fees_by_type[ledger_type] = fees_by_type.get(ledger_type, 0) + abs(amount)
     return fees_by_type
 
 def parse_receipts(receipts):
@@ -77,26 +99,55 @@ def parse_receipts(receipts):
 
     return pd.DataFrame(rows)
 
-def calculate_profit(df, fees_by_type):
+# GST/HST/PST rates by province (as of 2026). Etsy does NOT remit this once
+# a GST/HST number is added to the shop -- the seller is responsible for
+# calculating and remitting it themselves.
+PROVINCE_TAX_RATES = {
+    "AB": 0.05,    # GST only
+    "BC": 0.05,    # GST only (PST not collected by Etsy/marketplace, out of scope)
+    "MB": 0.05,    # GST only (PST not collected by Etsy/marketplace, out of scope)
+    "NB": 0.15,    # HST
+    "NL": 0.15,    # HST
+    "NS": 0.14,    # HST
+    "NT": 0.05,    # GST only
+    "NU": 0.05,    # GST only
+    "ON": 0.13,    # HST
+    "PE": 0.15,    # HST
+    "QC": 0.05,    # GST only (QST not collected by Etsy/marketplace, out of scope)
+    "SK": 0.05,    # GST only (PST not collected by Etsy/marketplace, out of scope)
+    "YT": 0.05,    # GST only
+}
+
+def calculate_gst_hst_by_province(df):
+    ca_orders = df[df["country"] == "CA"]
+    if ca_orders.empty:
+        return pd.DataFrame(columns=["orders", "taxable_sales", "tax_rate", "tax_owed"])
+
+    grouped = ca_orders.groupby("province").agg(
+        orders=("receipt_id", "count"),
+        taxable_sales=("subtotal", "sum"),
+    )
+    grouped["tax_rate"] = grouped.index.map(lambda p: PROVINCE_TAX_RATES.get(p, 0))
+    grouped["tax_owed"] = grouped["taxable_sales"] * grouped["tax_rate"]
+    return grouped.sort_values("tax_owed", ascending=False)
+
+def calculate_profit(df, fees_by_type, gst_hst_owed):
     gross = df["grandtotal"].sum()
-    tax = df["tax_collected"].sum()
     total_fees = sum(fees_by_type.values())
-    net = gross - tax - total_fees
+    net = gross - gst_hst_owed - total_fees
 
     summary = {
         "Total Orders": len(df),
         "Gross Revenue": gross,
-        "Tax Collected (remit to CRA)": tax,
+        "GST/HST Owed (you remit to CRA)": gst_hst_owed,
         "Discounts Given": df["discount"].sum(),
         "--- Etsy Fees ---": None,
-        "  Listing Fees": fees_by_type.get("listing", 0),
-        "  Transaction Fees (6.5%)": fees_by_type.get("transaction", 0),
-        "  Payment Processing Fees": fees_by_type.get("payment_processing", 0),
-        "  Offsite Ads Fees": fees_by_type.get("offsite_ads", 0),
-        "Total Etsy Fees": total_fees,
-        "--- Result ---": None,
-        "Net Profit": net,
     }
+    for ledger_type, amount in sorted(fees_by_type.items(), key=lambda x: -x[1]):
+        summary[f"  {ledger_type}"] = amount
+    summary["Total Etsy Fees"] = total_fees
+    summary["--- Result ---"] = None
+    summary["Net Profit"] = net
     return summary
 
 if __name__ == "__main__":
@@ -113,10 +164,12 @@ if __name__ == "__main__":
 
     df = parse_receipts(receipts)
     fees_by_type = calculate_fees(entries)
+    gst_hst = calculate_gst_hst_by_province(df)
+    gst_hst_total = gst_hst["tax_owed"].sum() if not gst_hst.empty else 0
     print(f"\nProcessing {len(df)} non-cancelled orders\n")
     print("=" * 40)
 
-    summary = calculate_profit(df, fees_by_type)
+    summary = calculate_profit(df, fees_by_type, gst_hst_total)
     for k, v in summary.items():
         if v is None:
             print(f"\n{k}")
@@ -124,4 +177,17 @@ if __name__ == "__main__":
             print(f"{k}: ${v:,.2f} CAD")
         else:
             print(f"{k}: {v}")
+    print("=" * 40)
+
+    print("\nGST/HST Owed by Province (you must remit to CRA)")
+    print("-" * 40)
+    if gst_hst.empty:
+        print("No Canadian orders in this period.")
+    else:
+        for province, row in gst_hst.iterrows():
+            print(f"{province}: {int(row['orders'])} orders, "
+                  f"taxable sales ${row['taxable_sales']:,.2f}, "
+                  f"rate {row['tax_rate']*100:.0f}%, "
+                  f"tax owed ${row['tax_owed']:,.2f} CAD")
+        print(f"\nTotal GST/HST owed: ${gst_hst_total:,.2f} CAD")
     print("=" * 40)
