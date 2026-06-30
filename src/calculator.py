@@ -150,9 +150,53 @@ def calculate_profit(df, fees_by_type, gst_hst_owed):
     summary["Net Profit"] = net
     return summary
 
+def build_report_lines(label, df, summary, gst_hst, gst_hst_total):
+    lines = []
+    lines.append(f"Syntaxis Profit Report -- {label}")
+    lines.append(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    lines.append(f"\nProcessing {len(df)} non-cancelled orders")
+    lines.append("=" * 40)
+
+    for k, v in summary.items():
+        if v is None:
+            lines.append(f"\n{k}")
+        elif isinstance(v, float):
+            lines.append(f"{k}: ${v:,.2f} CAD")
+        else:
+            lines.append(f"{k}: {v}")
+    lines.append("=" * 40)
+
+    lines.append("\nGST/HST Owed by Province (you must remit to CRA)")
+    lines.append("-" * 40)
+    if gst_hst.empty:
+        lines.append("No Canadian orders in this period.")
+    else:
+        for province, row in gst_hst.iterrows():
+            lines.append(f"{province}: {int(row['orders'])} orders, "
+                          f"taxable sales ${row['taxable_sales']:,.2f}, "
+                          f"rate {row['tax_rate']*100:.0f}%, "
+                          f"tax owed ${row['tax_owed']:,.2f} CAD")
+        lines.append(f"\nTotal GST/HST owed: ${gst_hst_total:,.2f} CAD")
+    lines.append("=" * 40)
+    return lines
+
+def save_report(label, df, lines):
+    outputs_dir = os.path.join(os.path.dirname(__file__), "..", "outputs")
+    os.makedirs(outputs_dir, exist_ok=True)
+
+    safe_label = label.replace(" ", "_")
+    report_path = os.path.join(outputs_dir, f"profit_report_{safe_label}.txt")
+    with open(report_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+
+    csv_path = os.path.join(outputs_dir, f"orders_{safe_label}.csv")
+    df.to_csv(csv_path, index=False)
+
+    return report_path, csv_path
+
 if __name__ == "__main__":
     year = int(sys.argv[1]) if len(sys.argv) > 1 else None
-    label = str(year) if year else "all time"
+    label = str(year) if year else "all_time"
 
     print(f"Fetching receipts ({label})...")
     receipts = fetch_all_receipts(year=year)
@@ -166,28 +210,14 @@ if __name__ == "__main__":
     fees_by_type = calculate_fees(entries)
     gst_hst = calculate_gst_hst_by_province(df)
     gst_hst_total = gst_hst["tax_owed"].sum() if not gst_hst.empty else 0
-    print(f"\nProcessing {len(df)} non-cancelled orders\n")
-    print("=" * 40)
 
     summary = calculate_profit(df, fees_by_type, gst_hst_total)
-    for k, v in summary.items():
-        if v is None:
-            print(f"\n{k}")
-        elif isinstance(v, float):
-            print(f"{k}: ${v:,.2f} CAD")
-        else:
-            print(f"{k}: {v}")
-    print("=" * 40)
+    lines = build_report_lines(label, df, summary, gst_hst, gst_hst_total)
 
-    print("\nGST/HST Owed by Province (you must remit to CRA)")
-    print("-" * 40)
-    if gst_hst.empty:
-        print("No Canadian orders in this period.")
-    else:
-        for province, row in gst_hst.iterrows():
-            print(f"{province}: {int(row['orders'])} orders, "
-                  f"taxable sales ${row['taxable_sales']:,.2f}, "
-                  f"rate {row['tax_rate']*100:.0f}%, "
-                  f"tax owed ${row['tax_owed']:,.2f} CAD")
-        print(f"\nTotal GST/HST owed: ${gst_hst_total:,.2f} CAD")
-    print("=" * 40)
+    print()
+    for line in lines:
+        print(line)
+
+    report_path, csv_path = save_report(label, df, lines)
+    print(f"\nSaved report to {report_path}")
+    print(f"Saved order data to {csv_path}")
