@@ -4,3 +4,4 @@ verifier.tmp
 __pycache__/
 *.pyc
 outputs/
+src/expenses.py
