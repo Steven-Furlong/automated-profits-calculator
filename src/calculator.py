@@ -153,7 +153,54 @@ def calculate_profit(df, fees_by_type, gst_hst_owed, total_expenses=0):
     summary["Net Profit"] = net
     return summary
 
-def build_report_lines(label, df, summary, gst_hst, gst_hst_total, by_category=None, uncategorized=None, total_uncategorized=0):
+def build_monthly_breakdown(df, entries, expenses_df):
+    if df.empty:
+        return None
+
+    df = df.copy()
+    df["month"] = df["date"].dt.to_period("M")
+
+    monthly_revenue = df.groupby("month").agg(
+        orders=("receipt_id", "count"),
+        revenue=("grandtotal", "sum"),
+    )
+
+    # Fees by month from ledger entries
+    fee_rows = []
+    for e in entries:
+        ledger_type = e.get("ledger_type", "")
+        if ledger_type in NON_FEE_TYPES:
+            continue
+        amount = e["amount"] / 100
+        if amount >= 0:
+            continue
+        ts = e.get("created_timestamp") or e.get("create_date")
+        if ts:
+            period = pd.Period(datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m"), freq="M")
+            fee_rows.append({"month": period, "fee": abs(amount)})
+
+    if fee_rows:
+        fee_df = pd.DataFrame(fee_rows)
+        monthly_fees = fee_df.groupby("month")["fee"].sum().rename("etsy_fees")
+    else:
+        monthly_fees = pd.Series(dtype=float, name="etsy_fees")
+
+    # Expenses by month from CC CSV
+    if expenses_df is not None and not expenses_df.empty:
+        biz = expenses_df[~expenses_df["category"].isin(["EXCLUDED"])]
+        biz = biz.copy()
+        biz["month"] = biz["date"].dt.to_period("M")
+        monthly_exp = biz.groupby("month")["amount_cad"].sum().rename("expenses")
+    else:
+        monthly_exp = pd.Series(dtype=float, name="expenses")
+
+    combined = monthly_revenue.join(monthly_fees, how="outer").join(monthly_exp, how="outer").fillna(0)
+    combined["net"] = combined["revenue"] - combined["etsy_fees"] - combined["expenses"]
+    combined = combined.reset_index()
+    combined["month"] = combined["month"].astype(str)
+    return combined
+
+def build_report_lines(label, df, summary, gst_hst, gst_hst_total, by_category=None, uncategorized=None, total_uncategorized=0, entries_for_monthly=None, expenses_df_for_monthly=None):
     lines = []
     lines.append(f"Syntaxis Profit Report -- {label}")
     lines.append(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
@@ -181,6 +228,30 @@ def build_report_lines(label, df, summary, gst_hst, gst_hst_total, by_category=N
                           f"tax owed ${row['tax_owed']:,.2f} CAD")
         lines.append(f"\nTotal GST/HST owed: ${gst_hst_total:,.2f} CAD")
     lines.append("=" * 40)
+
+    monthly = build_monthly_breakdown(df, entries_for_monthly, expenses_df_for_monthly)
+    if monthly is not None:
+        lines.append("\nMonth-to-Month Breakdown")
+        lines.append("-" * 72)
+        lines.append(f"{'Month':<10} {'Orders':>6} {'Revenue':>12} {'Etsy Fees':>12} {'Expenses':>12} {'Net':>12}")
+        lines.append("-" * 72)
+        for _, row in monthly.iterrows():
+            lines.append(
+                f"{row['month']:<10} {int(row['orders']):>6} "
+                f"${row['revenue']:>10,.2f} "
+                f"${row['etsy_fees']:>10,.2f} "
+                f"${row['expenses']:>10,.2f} "
+                f"${row['net']:>10,.2f}"
+            )
+        lines.append("-" * 72)
+        lines.append(
+            f"{'TOTAL':<10} {int(monthly['orders'].sum()):>6} "
+            f"${monthly['revenue'].sum():>10,.2f} "
+            f"${monthly['etsy_fees'].sum():>10,.2f} "
+            f"${monthly['expenses'].sum():>10,.2f} "
+            f"${monthly['net'].sum():>10,.2f}"
+        )
+        lines.append("=" * 72)
 
     if by_category is not None and len(by_category) > 0:
         lines.append("\nBusiness Expenses by Category")
@@ -228,12 +299,13 @@ if __name__ == "__main__":
     gst_hst = calculate_gst_hst_by_province(df)
     gst_hst_total = gst_hst["tax_owed"].sum() if not gst_hst.empty else 0
 
+    expenses_df = parse_expenses(csv_path, year=year) if csv_path else None
     by_category, total_expenses, uncategorized, total_uncategorized = (
-        summarize_expenses(parse_expenses(csv_path, year=year)) if csv_path else ({}, 0, pd.DataFrame(), 0)
+        summarize_expenses(expenses_df) if expenses_df is not None else ({}, 0, pd.DataFrame(), 0)
     )
 
     summary = calculate_profit(df, fees_by_type, gst_hst_total, total_expenses)
-    lines = build_report_lines(label, df, summary, gst_hst, gst_hst_total, by_category, uncategorized, total_uncategorized)
+    lines = build_report_lines(label, df, summary, gst_hst, gst_hst_total, by_category, uncategorized, total_uncategorized, entries_for_monthly=entries, expenses_df_for_monthly=expenses_df)
 
     print()
     for line in lines:
