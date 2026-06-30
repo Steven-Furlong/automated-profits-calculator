@@ -75,7 +75,7 @@ Reports are saved to `outputs/profit_report_YEAR.txt` and `outputs/orders_YEAR.c
 
 ## Credit Card CSV
 
-Export your RBC Visa statement as CSV from RBC Online Banking (Download Transactions → CSV format). The parser expects the standard RBC format:
+Export your CC statement as CSV from Online Banking Portal. The parser expects the standard CSV format, unique to your bank:
 
 ```
 Account Type,Account Number,Transaction Date,Cheque Number,Description 1,Description 2,CAD$,USD$
@@ -103,7 +103,7 @@ automated-profits-calculator/
 │   ├── get_token.py     # Exchanges auth code for tokens, saves to .env
 │   ├── etsy_client.py   # Etsy API calls + auto token refresh
 │   ├── calculator.py    # Main script — fetches, calculates, and reports
-│   └── expenses.py      # RBC CSV parser and expense categorizer
+│   └── expenses.py      # CC CSV parser and expense categorizer
 ├── outputs/             # Generated reports (gitignored)
 ├── .env                 # API credentials (gitignored)
 └── .gitignore
